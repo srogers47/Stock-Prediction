@@ -6,11 +6,12 @@ import tqdm
 import lxml
 import json
 from bs4 import BeautifulSoup as BS 
+import re 
 
 
 class Main:
     sitemap_urls = [] #List of urls returned from gen_urls(). 
-    article_urls = [] #Articles parsed from sitemaps. 
+    article_urls = [] #Article urls extracted from sitemaps. 
 
     def gen_urls(self):
         """
@@ -32,49 +33,62 @@ class Main:
         return self.sitemap_urls
 
     async def fetch_url(self, session, url):
-        """testing aiohttp async function. Sitemap urls should be generated, not hardcoded.""" 
+        """
+        Fetch article urls extracted from sitemap xml files.
+        Call coroutine crawl_url and pass in  article_url.
+        """ 
         async with session.get(url) as response:
             text = await response.text() #Need await in context manager async with 
             #print("URL: {} - TEXT:I {}".format(url, len(text)))
             #Parse xml file for article urls 
             xml_soup = BS(text, "lxml")
-            self.article_urls.append(xml_soup.loc) #NOTE: Due to async tasks completing without order, article urls won't be sorted. 
+            self.article_urls.append(xml_soup.loc.string) #NOTE: Due to async tasks completing without order, article urls won't be sorted. 
             article_tasks = [self.crawl_url(session, article_url) for article_url in self.article_urls] #Create task for crawling article urls. 
-            results = [await i for i in tqdm.tqdm(asyncio.as_completed(article_tasks), total=len(article_tasks))] 
+            results = await asyncio.gather(*article_tasks) #Gather tasks to run as coroutines
             return results
+
 
     async def crawl_url(self, session, article_url):
         """Crawl article urls and extract text/html.""" 
-        #Need to implement aiofiles to save articles --> See saving_articles_test.py. 
+        print(article_url) 
         async with session.get(article_url) as response: #from article_urls
-            html = response.text() 
+            html = await response.text() 
+            print("THIS IS HTML ", html) 
             soup = BS(html, "html.parser") #Make the soup, parse html to extract article data points.
             #Selectors are dynamic (with exception to author), will change periodically.  
             #Select via class containing desired text. 
-            content_ = soup.main.article 
-            title = content_.find("h1", {"class*":"ArticleTitle"}).string 
-            author = content_.find("address", {"id":"byline"}) #Locate via id 
+            content = soup.main.article
+            print("THIS IS CONTENT",content) 
+
+            ###REGULAR EXPRESSIONS with css selectors 
+
+            title = content.select_one("h1[class^='ArticleTitle']").string
+            author = content.select_one("address[id='byline']") #Locate via id, NOT regex
             author = author.a.string #Author nested in <a tag text
-            article_text = content_.find("p", {"class*":"ArticleParagraph"}).string #All article text.
-            date_posted = content_.find("time", {"class*":"ArticleTimestamp"}).attrs  #Data posted for sorting events to compare to financial data.
+            article_text = content.select_one("p[class^='ArticleParagraph']").string #All article text.
+            date_posted = content.select_one("time[class^='ArticleTimestamp']").attrs  #Data posted for sorting events to compare to financial data.
+
+
             #NOTE: Prepare data for insert. Need to serialize data into JSON before inserting into mongodb database.
             #First create a dict 
             temp_dict = {
                     "Title":title,
                     "Author":author,
-                    "Text":text,
-                    "Date/time":date_posted
+                    "Text":article_text, #NOTE: DEBUG. Text in json is "null"? Fix extraction 
+                    "Date/time":str(date_posted) #Should i specify string? 
                     } 
             #Then serialize
             json_article = json.dumps(temp_dict) 
             print(json_article) 
             return json_article 
 
+        #NOTE:Next test will look at async placement of json into non-relational database --> async_data_storage.py 
+
 
 
     async def parse_url(self, session, url): 
         """
-        Calls fetch_url. Gets document link from sitemap_urls.
+        Calls fetch_url. Gets document article link from sitemap url.
         """
         doc = await self.fetch_url(session, url)
         print("DOC: {}".format(doc, len(doc))) 
@@ -82,11 +96,11 @@ class Main:
 
 
     async def parse_urls(self, sitemap_urls, loop):
-        """Initialize async calls, track with progress bar.  Use gather for url gen iteration.""" 
+        """Initialize async calls.""" 
         async with aiohttp.ClientSession(loop=loop) as session:
             tasks = [self.parse_url(session, str(url)) for url in self.sitemap_urls] #Create tasks for getting article urls from sitemap_urls list. 
-            #tqdm is a progress bar module that will be used in production env. 
-            responses = [await f for f in tqdm.tqdm(asyncio.as_completed(tasks), total = len(tasks))] 
+            responses = await asyncio.gather(*tasks) 
+            #responses = [await f for f in tqdm.tqdm(asyncio.as_completed(tasks), total = len(tasks))] 
             return responses 
 
 if __name__ == "__main__":
@@ -95,4 +109,5 @@ if __name__ == "__main__":
     m.gen_urls() 
     loop = asyncio.get_event_loop()
     parsed_data = loop.run_until_complete(m.parse_urls(m.sitemap_urls, loop)) 
+    print(m.article_urls) #NOTE: Debugging 
     print(parsed_data) 
